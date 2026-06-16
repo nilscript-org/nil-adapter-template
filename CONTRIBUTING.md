@@ -76,4 +76,4 @@ and badged **Official Verified Adapter**.
 
 - Repo: `<service>-nil-adapter` (e.g. `pocketbase-nil-adapter`).
 - Python package inside: `<service>_nil_adapter`.
-- Pin the minimum kernel version you conform to (e.g. `nilscript>=0.3.0`); your own version is independent.
+- Pin the minimum kernel version you conform to (e.g. `nilscript>=0.2.1`); your own version is independent.
