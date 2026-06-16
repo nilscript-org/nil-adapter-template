@@ -1,0 +1,68 @@
+# nil-adapter-template
+
+> **The fork base for every NIL adapter.** Click **"Use this template"** to start a new
+> adapter for your backend. You never fork the core (`nilscript`) — you fork *this*.
+
+This is a pristine `nilscript scaffold-shim` output: a complete, bootable NIL shim whose
+edge / state / models / manifest loader are generic and finished, and whose three
+fill-in files ship as `NotImplementedError` stubs. **The bundled conformance proof is red
+on day one** — that is the point. As you fill the stubs, the write verbs flip green.
+
+## Quick start
+
+1. **Use this template** → your repo `my-backend-nil-adapter`.
+2. Rename the package `src/nil_adapter_template/` → `src/my_backend_nil_adapter/` and update
+   `name`/`description` in `pyproject.toml`.
+3. Fill the three files (see [CONTRIBUTING.md](./CONTRIBUTING.md)):
+   - `src/<pkg>/system.py` — `RealSystemClient`: the **one** place I/O happens.
+   - `src/<pkg>/translate.py` — map each active NIL verb to a native document, and back.
+   - `src/<pkg>/compensation.py` — declare reversible verbs + compensation tokens.
+4. Prove it.
+
+## Verify
+
+```
+pip install -e ".[dev]"
+pytest                         # offline conformance proof against the in-memory FakeSystem
+```
+
+On a fresh template `pytest` **fails** every active write verb (the stubs raise
+`NotImplementedError`) — proving the harness detects non-conformance, not just conformance.
+Fill the stubs until it is green.
+
+Then, against a running shim:
+
+```
+nilscript conformance-test --url https://your-shim.example --verb services.create_invoice
+nilscript manifest validate requirements-manifest.json
+```
+
+## The three conformance gates
+
+CI (`.github/workflows/conformance.yml`) wires all three — see [CONTRIBUTING.md](./CONTRIBUTING.md)
+for what each means and what "conformant" precisely is (and is not):
+
+1. **Offline proof** — `pytest` green (every write verb reaches `executed`; rollback honesty holds).
+2. **Live proof** — `nilscript conformance-test` green per verb, across all three reversibility tiers.
+3. **Manifest honesty** — `nilscript manifest validate` passes; tiers are earned, not asserted.
+
+## Layout
+
+```
+src/nil_adapter_template/
+  edge.py          # generic NIL edge — do not edit
+  state.py         # proposal/commit state machine — do not edit
+  models.py        # generated request/response models — do not edit
+  manifest.py      # reads requirements-manifest.json — do not edit
+  run.py           # uvicorn entrypoint
+  system.py        # <- FILL: RealSystemClient (the only I/O)
+  translate.py     # <- FILL: verb -> native mapping
+  compensation.py  # <- FILL: reversibility + compensation tokens
+conformance/
+  test_conformance.py   # the offline proof (red until you fill the stubs)
+requirements-manifest.json
+```
+
+## License
+
+See the core standard at [github.com/nilscript-org/nilscript](https://github.com/nilscript-org/nilscript).
