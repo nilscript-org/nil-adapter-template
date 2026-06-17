@@ -22,6 +22,12 @@ class SystemClient(Protocol):
 
     def delete(self, target: str, record_id: str) -> None: ...
 
+    def exists(self, target: str) -> bool: ...  # is this native target provisioned? (PROPOSE preflight)
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None: ...  # target shape (skeleton), or None
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None: ...  # one record (before-image)
+
 
 class RealSystemClient:
     """TODO: talk to your backend here (the only I/O in the adapter)."""
@@ -41,6 +47,20 @@ class RealSystemClient:
 
     def delete(self, target: str, record_id: str) -> None:
         raise NotImplementedError("implement delete() against your backend")
+
+    def exists(self, target: str) -> bool:
+        # Override to check your backend (e.g. does this table/collection exist?). Returning True
+        # disables the PROPOSE preflight; implement a real check for honest "not provisioned" refusals.
+        return True
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None:
+        # Override to fetch your backend's target shape (skeleton): a list of {name, type, required}
+        # field dicts, or None if the target isn't provisioned. Powers /describe + agent awareness.
+        return []
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        # Override to fetch one record by id (the before-image used for generic-CRUD reversibility).
+        return None
 
 
 class FakeSystem:
@@ -74,3 +94,12 @@ class FakeSystem:
 
     def delete(self, target: str, record_id: str) -> None:
         self.docs[target] = [r for r in self.docs.get(target, []) if r.get("name") != record_id]
+
+    def exists(self, target: str) -> bool:
+        return True  # in-memory backend is always ready (creates targets on demand)
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None:
+        return []  # schemaless in-memory store — provisioned, no declared fields
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        return next((r for r in self.docs.get(target, []) if r.get("name") == record_id), None)

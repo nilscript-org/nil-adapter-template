@@ -1,0 +1,3 @@
+# The fork base. Its generic modules (edge/state/manifest/models) are the parity
+# reference — every adapter must stay byte-identical to them modulo backend identity.
+*                       @nilscript-org/maintainers

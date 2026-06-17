@@ -14,10 +14,20 @@ on day one** — that is the point. As you fill the stubs, the write verbs flip 
 2. Rename the package `src/nil_adapter_template/` → `src/my_backend_nil_adapter/` and update
    `name`/`description` in `pyproject.toml`.
 3. Fill the three files (see [CONTRIBUTING.md](./CONTRIBUTING.md)):
-   - `src/<pkg>/system.py` — `RealSystemClient`: the **one** place I/O happens.
+   - `src/<pkg>/system.py` — `RealSystemClient`: the **one** place I/O happens. Implement
+     `create/list/update/delete` **and** `exists(target)`, `schema(target)`, `get(target,id)` —
+     these light up discovery, the PROPOSE preflight, and generic reversibility.
    - `src/<pkg>/translate.py` — map each active NIL verb to a native document, and back.
    - `src/<pkg>/compensation.py` — declare reversible verbs + compensation tokens.
 4. Prove it.
+
+### Free for every adapter (0.3.0)
+
+You do **not** author these — the generic edge provides them once you implement the I/O above:
+- **`GET /nil/v0.1/describe`** — your *skeleton* (`{system, verbs, targets:{name:{exists, fields[]}}}`), the mandatory conformance row.
+- **PROPOSE preflight** — refuses (`UPSTREAM_UNAVAILABLE`) when a target isn't provisioned.
+- **Generic `resource.*` CRUD** (`create/read/update/delete`) over any target, with synthesized
+  reversibility (before-image restore) and id-or-human-identifier resolution.
 
 ## Verify
 
