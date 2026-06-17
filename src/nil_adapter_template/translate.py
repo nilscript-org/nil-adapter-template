@@ -265,6 +265,10 @@ QUERY_VERBS: dict[str, QueryVerb] = {
 
 
 def entity_ref(verb: WriteVerb, created: dict[str, Any]) -> dict[str, Any]:
-    name = created.get("name", "")
+    # The SSOT entity id MUST be the backend's real record key, so a compensating
+    # update/delete (ROLLBACK) targets the record itself — never a human attribute that
+    # can collide or change. Same precedence the generic resource.* path uses: id, then
+    # name (Frappe-style backends whose primary key IS `name` fall through correctly).
+    rid = created.get("id") or created.get("name") or ""
     slug = verb.doctype.lower().replace(" ", "-")
-    return {"type": verb.entity_type, "id": name, "url": f"/{slug}/{name}"}
+    return {"type": verb.entity_type, "id": rid, "url": f"/{slug}/{rid}"}
