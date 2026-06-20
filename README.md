@@ -1,5 +1,7 @@
 # nil-adapter-template
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20774491.svg)](https://doi.org/10.5281/zenodo.20774491)
+
 > **The fork base for every NIL adapter.** Click **"Use this template"** to start a new
 > adapter for your backend. You never fork the core (`nilscript`) — you fork *this*.
 
@@ -76,3 +78,19 @@ requirements-manifest.json
 ## License
 
 See the core standard at [github.com/nilscript-org/nilscript](https://github.com/nilscript-org/nilscript).
+
+## Citation
+
+This template is part of the **NIL (Network Intent Layer)** framework, described in a published paper
+archived on Zenodo with a permanent DOI:
+**[10.5281/zenodo.20774491](https://doi.org/10.5281/zenodo.20774491)**.
+
+```bibtex
+@misc{elkhider2026nil,
+  title  = {Unexpressible, Not Filtered: A Structural Framework for Governing AI-Agent Actions --- the Network Intent Layer},
+  author = {Elkhider, ElBasheir A. M.},
+  year   = {2026},
+  doi    = {10.5281/zenodo.20774491},
+  url    = {https://doi.org/10.5281/zenodo.20774491}
+}
+```
