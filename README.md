@@ -2,8 +2,13 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20774491.svg)](https://doi.org/10.5281/zenodo.20774491)
 
-> **The fork base for every NIL adapter.** Click **"Use this template"** to start a new
-> adapter for your backend. You never fork the core (`nilscript`) — you fork *this*.
+**The fork base for every NIL governed-action adapter.** Every adapter built from this template speaks
+the NIL contract (propose -> approve -> commit, skeleton-bounded, earned reversibility): an agent
+proposes intent, the deterministic kernel is the only thing that commits, and a verb or target the
+backend never declared is unexpressible, not filtered.
+
+> Click **"Use this template"** to start a new adapter for your backend. You never fork the core
+> (`nilscript`) — you fork *this*.
 
 This is a pristine `nilscript scaffold-shim` output: a complete, bootable NIL shim whose
 edge / state / models / manifest loader are generic and finished, and whose three
