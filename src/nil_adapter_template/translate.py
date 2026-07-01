@@ -9,7 +9,7 @@ implement them, so the shim cannot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from nil_adapter_template.system import SystemClient
@@ -26,6 +26,10 @@ class WriteVerb:
     to_native: Callable[[dict[str, Any]], dict[str, Any]]
     preview: Callable[[dict[str, Any]], Bilingual]
     entity_type: str
+    # DECLARED prerequisites: each field here points to a record in another target (a foreign key).
+    # The edge verifies the referenced record EXISTS before proposing — so "an invoice needs a client"
+    # is a fact the adapter states, enforced universally, not a backend-specific afterthought.
+    references: dict[str, str] = field(default_factory=dict)
 
     def missing(self, args: dict[str, Any]) -> list[str]:
         return [field for field in self.required if not args.get(field)]
@@ -215,6 +219,7 @@ WRITE_VERBS: dict[str, WriteVerb] = {
         to_native=_to_native_create_invoice,
         preview=lambda a: {"en": "services.create_invoice", "ar": "services.create_invoice"},  # TODO: human preview
         entity_type="create_invoice",
+        references={"party_id": "Client"},  # an invoice needs an existing client/party
     ),
     "services.create_payment_link": WriteVerb(
         verb="services.create_payment_link",
@@ -224,6 +229,7 @@ WRITE_VERBS: dict[str, WriteVerb] = {
         to_native=_to_native_create_payment_link,
         preview=lambda a: {"en": "services.create_payment_link", "ar": "services.create_payment_link"},  # TODO: human preview
         entity_type="create_payment_link",
+        references={"invoice_id": "Invoice"},  # a payment link needs an existing invoice
     ),
     "services.draft_proposal": WriteVerb(
         verb="services.draft_proposal",
