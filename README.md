@@ -63,6 +63,21 @@ for what each means and what "conformant" precisely is (and is not):
 2. **Live proof** — `nilscript conformance-test` green per verb, across all three reversibility tiers.
 3. **Manifest honesty** — `nilscript manifest validate` passes; tiers are earned, not asserted.
 
+### The contract gate (rule C3 — adapters conform; capabilities never change)
+
+An adapter implements the platform's **canonical capabilities** (`IssueInvoice`, `ManageContact`,
+`RecordPayment`, …) — never backend-named verbs like `DaftaraCreateInvoice`. The capability
+contract is the API; `translate.py` is where YOUR backend conforms to it, not the other way
+around. Two obligations:
+
+- **Declare the shape**: `describe` must publish `verb_details: [{verb, tier, target, required}]`
+  so the control plane can shape-check a capability's cycle against your backend
+  (`CONTRACT_MISMATCH` at readiness instead of a silent post-approval failure).
+- **Prove the transform**: a `conformance/test_contract_gate.py` exercises every canonical verb
+  with the baseline contract's canonical inputs and asserts the native payload is postable
+  (e.g. a canonical invoice with a flat `amount` MUST synthesize the priced line item — a
+  line-less invoice is rejected by every real backend).
+
 ## Layout
 
 ```
