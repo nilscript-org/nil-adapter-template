@@ -32,6 +32,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nil_adapter_template import edge as edge_mod
+from nil_adapter_template import system as system_mod
 from nil_adapter_template.edge import CapturingEmitter, create_app
 from nil_adapter_template.recovery import (
     ATTEMPT_KEYED,
@@ -636,3 +637,75 @@ def test_write_op_classifies_the_standards_verb_lexicon() -> None:
     assert write_op("commerce.update_product") == "update"
     assert write_op("services.create_invoice") == "create"
     assert write_op("services.send_proposal") == "create", "a non-update/delete action mutates anew"
+
+
+# ── the hand-rolled retry loop: the hole BOTH existing forks fell into ───────────────────────────
+#
+# `RetryPolicy` gives a fork the right answer, but nothing stopped it from writing its own loop a
+# few lines below — and that is not hypothetical. odoo and daftara each INDEPENDENTLY invented an
+# unkeyed `for attempt in range(N)` around a write, which is how `commerce.record_payment` and
+# `services.create_invoice` became UNSAFE. A contract that only offers the safe path, without
+# closing the unsafe one, reproduces the defect in the next fork exactly as it did in the last two.
+
+_SANCTIONED_RETRY_OWNER = "RetryPolicy"
+
+
+def _hand_rolled_retry_loops(source: str) -> list[str]:
+    """Bounded loops in `system.py` that live OUTSIDE `RetryPolicy` — i.e. a fork's own retry.
+
+    Deliberately narrow: it flags the SHAPE both forks actually wrote (`for _ in range(N)` and
+    `while attempt/retries/tries ...`), not every loop. A transport module has legitimate loops
+    (pagination, parsing); a bounded retry counter around I/O is the one that duplicates money.
+    """
+    owner, offenders = None, []
+    for lineno, raw in enumerate(source.splitlines(), start=1):
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        if stripped.startswith(("class ", "def ")) and indent == 0:
+            owner = stripped
+        if owner and _SANCTIONED_RETRY_OWNER in owner:
+            continue                                   # the one place a retry loop belongs
+        if re.match(r"for\s+\w+\s+in\s+range\s*\(", stripped) or \
+           re.match(r"while\s+.*\b(attempt|retries|tries|backoff)\b", stripped):
+            offenders.append(f"{lineno}: {stripped}")
+    return offenders
+
+
+def test_no_fork_hand_rolls_its_own_retry_loop_in_system_py() -> None:
+    """THE GUARDRAIL. `RetryPolicy` is the only sanctioned retry in the transport module."""
+    source = Path(system_mod.__file__).read_text(encoding="utf-8")
+    offenders = _hand_rolled_retry_loops(source)
+    assert not offenders, (
+        "a hand-rolled retry loop in system.py — route it through RetryPolicy instead.\n"
+        "Both shipped forks wrote exactly this and turned a write into a duplicate:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_retry_loop_detector_actually_detects_one() -> None:
+    """POSITIVE CONTROL — mandatory. Without it, "0 offenders" and "the scanner is broken" are the
+    same result. This is the real daftara loop (`system.py:225-234`), verbatim in shape."""
+    daftara_shaped = (
+        "class RealSystemClient:\n"
+        "    def _request(self, method, path, **kwargs):\n"
+        "        delay = 0.5\n"
+        "        for attempt in range(5):\n"
+        "            resp = self._http.request(method, path, **kwargs)\n"
+        "            if resp.status_code != 429:\n"
+        "                return resp\n"
+        "            time.sleep(delay)\n"
+        "        return resp\n"
+    )
+    assert _hand_rolled_retry_loops(daftara_shaped), "the detector is blind to the real defect"
+
+
+def test_the_detector_does_not_flag_the_sanctioned_policy() -> None:
+    """The other half of the control: it must not fire on `RetryPolicy` itself, or the guardrail
+    would be unsatisfiable and every fork would delete it."""
+    sanctioned = (
+        "class RetryPolicy:\n"
+        "    def run(self, fn, *, is_write):\n"
+        "        for attempt in range(self.attempts):\n"
+        "            return fn()\n"
+    )
+    assert _hand_rolled_retry_loops(sanctioned) == []
