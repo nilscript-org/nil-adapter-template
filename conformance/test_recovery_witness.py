@@ -47,6 +47,7 @@ from nil_adapter_template.recovery import (
     gate_message,
     no_witness,
     unanswered_verbs,
+    witness_export,
     witness_verdict,
 )
 from nil_adapter_template.system import (
@@ -709,3 +710,67 @@ def test_the_detector_does_not_flag_the_sanctioned_policy() -> None:
         "            return fn()\n"
     )
     assert _hand_rolled_retry_loops(sanctioned) == []
+
+
+# ── the declaration must TRAVEL: describe() exports the witness so the plane can read it ─────────
+#
+# The witness matrix's second blocker (docs/EXTERNAL-WITNESS-MATRIX-2026-08-28.md §6, wosool-hub):
+# odoo's six witnessed verbs were "SAFE at the adapter; unreachable from the plane that would
+# recover them" — `describe().verb_details` carried verb/tier/target/required/reversibility and
+# nothing about recovery, so no control plane could ever route a retry by verdict. The contract
+# therefore requires the declaration to be EXPORTED, in one backing-agnostic shape, and requires
+# silence to stay visibly silent: an undeclared verb exports NO witness key at all, which every
+# consumer must read as UNKNOWN — and UNKNOWN is treated exactly as UNSAFE.
+
+
+class TestTheWitnessTravels:
+    def test_an_attempt_keyed_witness_serializes_completely(self) -> None:
+        out = witness_export(KEYED)
+        assert out == {
+            "shape": "attempt_keyed",
+            "field": "reference",
+            "lookup": "list('Order', {'reference': <marker>})",
+            "negative_authoritative": True,
+            "note": "`reference` is a free-text document reference the backend persists and can "
+                    "filter on.",
+        }
+
+    def test_a_convergent_witness_serializes_its_identity(self) -> None:
+        out = witness_export(CONVERGENT_VERB)
+        assert out["shape"] == "convergent"
+        assert out["identity"] == ["sku"]
+        assert out["negative_authoritative"] is True and out["lookup"]
+
+    def test_a_blind_negative_travels_as_False_never_by_omission(self) -> None:
+        """The recovery policy routes a non-authoritative NOT FOUND to the human gate. A consumer
+        that has to GUESS the flag from absence will guess wrong exactly once."""
+        assert witness_export(KEYED_BLIND_NEGATIVE)["negative_authoritative"] is False
+
+    def test_an_honest_none_is_an_ANSWER_distinct_from_silence(self) -> None:
+        """`no_witness(reason)` and 'never declared' are different facts: the first is a considered
+        UNSAFE, the second is an unanswered question (UNKNOWN). Collapsing them would hide exactly
+        the verbs the gate exists to surface."""
+        out = witness_export(ABSENT)
+        assert out["shape"] == "none" and "reference field" in out["note"]
+
+    def test_an_undeclared_verb_exports_NOTHING(self) -> None:
+        assert witness_export(UNDECLARED) is None
+
+    def test_describe_carries_the_witness_per_verb(self, monkeypatch) -> None:
+        """The wire proof: a declared witness appears on the verb's describe row, serialized."""
+        monkeypatch.setitem(WRITE_VERBS, KEYED.verb, KEYED)
+        rows = _app(FakeSystem()).get("/nil/v0.1/describe").json()["verb_details"]
+        row = next(r for r in rows if r["verb"] == KEYED.verb)
+        assert row["witness"] == witness_export(KEYED)
+        assert row["tier"] == "HIGH" and row["target"] == "Order"
+
+    def test_describe_stays_SILENT_for_an_undeclared_verb(self) -> None:
+        """Silence must travel as silence: no witness key, not `null`, not a defaulted shape —
+        the consumer's fail-closed floor (UNKNOWN ⇒ UNSAFE) only works if absence is absent."""
+        rows = _app(FakeSystem()).get("/nil/v0.1/describe").json()["verb_details"]
+        undeclared = [r for r in rows if getattr(WRITE_VERBS.get(r["verb"]), "witness", None) is None]
+        assert undeclared, "the fresh template should still have undeclared verbs to prove this on"
+        assert all("witness" not in r for r in undeclared), (
+            "an undeclared verb exported a witness key — silence stopped being visible",
+            [r for r in undeclared if "witness" in r][:3],
+        )

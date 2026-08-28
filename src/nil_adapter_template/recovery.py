@@ -204,6 +204,33 @@ def unanswered_verbs(verbs: Mapping[str, Any]) -> list[str]:
     return sorted(name for name, verb in verbs.items() if getattr(verb, "witness", None) is None)
 
 
+def witness_export(verb: Any) -> dict[str, Any] | None:
+    """The witness declaration as it TRAVELS — one backing-agnostic dict on the verb's
+    `describe().verb_details` row, so the control plane can route recovery by verdict instead of
+    guessing (the matrix's second blocker: "SAFE at the adapter; unreachable from the plane").
+
+    `None` for an UNDECLARED verb, and the caller must then export NO key at all: silence has to
+    stay visible — the consumer's fail-closed floor (absent ⇒ UNKNOWN ⇒ UNSAFE) only works if
+    absence is absent. `no_witness(reason)` is different: a considered UNSAFE, exported with its
+    reason, because "we looked and there is nothing to query on" and "nobody ever asked" must never
+    read the same.
+    """
+    witness = getattr(verb, "witness", None)
+    if witness is None:
+        return None
+    if witness.shape == NO_WITNESS:
+        return {"shape": NO_WITNESS, "note": witness.note}
+    out: dict[str, Any] = {"shape": witness.shape, "lookup": witness.lookup,
+                           "negative_authoritative": witness.negative_authoritative}
+    if witness.shape == ATTEMPT_KEYED:
+        out["field"] = witness.field
+    else:  # CONVERGENT — __post_init__ admits no other durable shape
+        out["identity"] = list(witness.identity)
+    if witness.note:
+        out["note"] = witness.note
+    return out
+
+
 def gate_message(gaps: list[str]) -> str:
     """The conformance gate's failure text: the rule, the offenders, and the six questions to
     answer. A fork author must meet this contract before writing the verb, not after an incident."""

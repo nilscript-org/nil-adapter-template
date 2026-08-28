@@ -20,7 +20,12 @@ from fastapi import Body, FastAPI, Header, HTTPException, Response
 
 from nil_adapter_template.compensation import COMPENSATIONS, compensate
 from nil_adapter_template.manifest import apply_transport_quirks, overlay_requirements
-from nil_adapter_template.recovery import ATTEMPT_KEYED, CANONICAL_SENTENCE, CONVERGENT
+from nil_adapter_template.recovery import (
+    ATTEMPT_KEYED,
+    CANONICAL_SENTENCE,
+    CONVERGENT,
+    witness_export,
+)
 from nil_adapter_template.state import ShimState
 from nil_adapter_template.system import OutcomeInDoubt, SystemClient, SystemError
 from nil_adapter_template.translate import QUERY_VERBS, WRITE_VERBS, entity_ref, write_op
@@ -780,6 +785,18 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             "verbs": ["resource.create", "resource.read", "resource.update", "resource.delete"]
                      + sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
             "targets": targets,
+            # The per-verb CONTRACT — and, since R2, the RECOVERY declaration travels on it.
+            # `witness` is `recovery.witness_export(v)`: the declared durable-witness shape the
+            # control plane routes recovery by. An UNDECLARED verb exports NO witness key at all —
+            # silence stays visible, and the consumer's fail-closed floor reads absence as
+            # UNKNOWN, which is treated exactly as UNSAFE. (A declaration is still not proof:
+            # the conformance gate is what demonstrates it; this is how the verdict TRAVELS.)
+            "verb_details": [
+                {"verb": v.verb, "tier": v.tier, "target": v.doctype,
+                 "required": list(v.required),
+                 **({"witness": w} if (w := witness_export(v)) is not None else {})}
+                for _, v in sorted(WRITE_VERBS.items())
+            ],
         }
 
     return app
