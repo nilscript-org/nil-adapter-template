@@ -774,3 +774,53 @@ class TestTheWitnessTravels:
             "an undeclared verb exported a witness key — silence stopped being visible",
             [r for r in undeclared if "witness" in r][:3],
         )
+
+
+# ── locked invariant #5: no external mutation without a business-effect identity (C2.6) ──────────
+#
+# Every edge read `key = body.get("idempotency_key", "")` and then used `""` like any other key —
+# so the FIRST keyless COMMIT stored `ledger[""]`, and the SECOND keyless COMMIT of a *different*
+# proposal answered `replayed: True` WITHOUT performing its write. Two unrelated business effects
+# shared an identity merely because a caller omitted one. This is not input validation — it is the
+# identity model: `missing key → MALFORMED → NO MUTATION`, universally (BOS plan, invariant #5).
+
+
+class TestAnEmptyKeyIsMalformedNotAnIdentity:
+    def test_a_keyless_commit_is_MALFORMED_and_mutates_NOTHING(self, monkeypatch) -> None:
+        _register(monkeypatch, KEYED)
+        system = FakeSystem()
+        out = _commit(_app(system), KEYED.verb, {"party_id": "p1"}, "")
+        assert out.get("outcome") == "refusal" and out["code"] == "MALFORMED", out
+        assert out.get("field") == "idempotency_key", out
+        assert system.docs.get(KEYED.doctype, []) == [], (
+            "the refusal happened AFTER the write — MALFORMED must gate the mutation, not report it"
+        )
+
+    def test_two_keyless_commits_never_share_the_empty_slot(self, monkeypatch) -> None:
+        """THE COLLISION, pinned: before this, commit #2 of a DIFFERENT proposal replayed commit
+        #1's status body — a receipt for an act that never ran, wearing `replayed: True`."""
+        _register(monkeypatch, KEYED)
+        system = FakeSystem()
+        client = _app(system)
+        first = _commit(client, KEYED.verb, {"party_id": "p1"}, "")
+        second = _commit(client, KEYED.verb, {"party_id": "p2"}, "")
+        assert first["code"] == "MALFORMED" and second["code"] == "MALFORMED"
+        assert second.get("replayed") is not True, (
+            "the second keyless commit replayed the first's slot — two unrelated business "
+            "effects shared an identity because a caller omitted one", second,
+        )
+
+    def test_a_real_key_is_untouched_by_the_guard(self, monkeypatch) -> None:
+        """Negative control: the guard must fire on ABSENCE only — a genuine key still commits,
+        and its same-key retry still replays."""
+        _register(monkeypatch, KEYED)
+        system = FakeSystem()
+        client = _app(system)
+        out = _commit(client, KEYED.verb, {"party_id": "p1"}, "k-1")
+        assert out.get("state") == "executed", out
+        again = client.post(
+            "/nil/v0.1/commit",
+            json={"nil": "0.1", "grant": "g", "workspace": "w",
+                  "body": {"proposal": "irrelevant", "idempotency_key": "k-1"}},
+        ).json()["body"]
+        assert again.get("replayed") is True, again

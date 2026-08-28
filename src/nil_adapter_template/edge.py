@@ -493,6 +493,18 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         _auth(authorization)
         body = env.get("body", {})
         key = body.get("idempotency_key", "")
+        if not key:
+            # Locked invariant #5 (C2.6): no external mutation without a non-empty business-effect
+            # identity. `""` used to be used like any other key — the first keyless COMMIT stored
+            # `ledger[""]` and the SECOND keyless COMMIT of a DIFFERENT proposal answered
+            # `replayed: True` without performing its write: two unrelated business effects sharing
+            # an identity because a caller omitted one. Not input validation — the identity model.
+            return _refusal(
+                env, "MALFORMED",
+                "COMMIT requires a non-empty idempotency_key: the business-effect identity is what "
+                "recovery probes by, and an act with no identity can never be safely retried.",
+                field="idempotency_key",
+            )
         # A FAST PATH, not the proof: `state.ledger` is in-process and dies with the worker, so it
         # can only recognise a retry this same process already served. The durable answer lives in
         # the backing system (see the recovery witness below and in recovery.py).
