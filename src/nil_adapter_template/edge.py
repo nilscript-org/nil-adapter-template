@@ -20,9 +20,10 @@ from fastapi import Body, FastAPI, Header, HTTPException, Response
 
 from nil_adapter_template.compensation import COMPENSATIONS, compensate
 from nil_adapter_template.manifest import apply_transport_quirks, overlay_requirements
+from nil_adapter_template.recovery import ATTEMPT_KEYED, CANONICAL_SENTENCE, CONVERGENT
 from nil_adapter_template.state import ShimState
-from nil_adapter_template.system import SystemClient, SystemError
-from nil_adapter_template.translate import QUERY_VERBS, WRITE_VERBS, entity_ref
+from nil_adapter_template.system import OutcomeInDoubt, SystemClient, SystemError
+from nil_adapter_template.translate import QUERY_VERBS, WRITE_VERBS, entity_ref, write_op
 
 NIL = "0.1"
 SYSTEM = "nil_template"
@@ -208,6 +209,178 @@ def _refusal(env: dict[str, Any], code: str, message: str, field: str | None = N
     return _envelope("PROPOSAL", env, body)
 
 
+# ── the attempt key, made queryable in the BACKING SYSTEM (see recovery.py) ──────────────────────
+# The caller's attempt identity arrives as the COMMIT body's `idempotency_key` and used to die in
+# `state.ledger`, a plain dict lost with the process — so no backing system ever learned it, and a
+# create could not be told apart from its own duplicate. Stamped into a queryable field it becomes
+# the thing to ASK ABOUT: "did this exact attempt already write?" is answerable, and that is the
+# whole difference between "park a human" and "recover deterministically".
+_IN_DOUBT = "OUTCOME_IN_DOUBT"  # the machine token every in-doubt refusal message opens with
+_KEY_SAFE = re.compile(r"[^A-Za-z0-9:._-]")
+
+
+def _idem_marker(key: str) -> str:
+    """A bounded, deterministic, queryable rendering of the attempt key. Bracketed so it stays
+    legible beside a human reference ("PO-0001 [WSL-prep:abc:r1]") and so a substring query cannot
+    collide with an unrelated value that merely shares a prefix."""
+    safe = _KEY_SAFE.sub("-", key.strip())
+    if len(safe) > 64:  # a key too long for the field still has to be EXACT — hash it, don't clip it
+        safe = "h" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+    return f"[WSL-{safe}]"
+
+
+def _stamp_field(client: SystemClient, verb: Any) -> str | None:
+    """The declared attempt-key field, but only if the LIVE target really carries it as a writable
+    one. A declaration is our belief; the backend's schema is the instance's truth, and believing
+    wrongly would turn every write on that target into a rejected one — worse than having no key.
+
+    A backend that declares NO fields (an empty schema: a schemaless/document store) can neither
+    confirm nor deny, so the declaration stands. `None` (target not provisioned) cannot."""
+    witness = getattr(verb, "witness", None)
+    if witness is None or witness.shape != ATTEMPT_KEYED or not witness.field:
+        return None
+    schema = client.schema(verb.doctype)
+    if schema is None:
+        return None
+    if not schema:
+        return witness.field  # schemaless: nothing here contradicts the declaration
+    meta = next((f for f in schema if f.get("name") == witness.field), None)
+    if meta is None or meta.get("readonly"):
+        return None
+    return witness.field
+
+
+def _find_by_marker(client: SystemClient, target: str, field: str, marker: str) -> dict[str, Any] | None:
+    """The ask-first probe: has THIS attempt already written its record?
+
+    Two hits mean a duplicate already exists under this key (or the key was reused). Which of them
+    this commit produced is not knowable from here, so it raises the doubt rather than picking one —
+    and, crucially, rather than adding a third."""
+    rows = client.list(target, {field: marker})
+    # Re-check client-side: a backend's own filter may be fuzzy, and the marker must match EXACTLY
+    # or the probe would "recover" somebody else's record.
+    hits = [r for r in rows if marker in str(r.get(field, ""))]
+    if len(hits) > 1:
+        raise OutcomeInDoubt(
+            f"{len(hits)} {target} records already carry this attempt key in `{field}` — which of "
+            f"them belongs to this commit cannot be told from here",
+            target=target, operation="create",
+        )
+    if not hits:
+        return None
+    rid = str(hits[0].get("id") or hits[0].get("name") or "")
+    return client.get(target, rid) or dict(hits[0])
+
+
+def _convergent_id(client: SystemClient, verb: Any, args: dict[str, Any]) -> str | None:
+    """Resolve the STABLE identity a convergent verb declared, so its state can be read back."""
+    witness = getattr(verb, "witness", None)
+    if witness is None or witness.shape != CONVERGENT:
+        return None
+    raw = next((str(args[f]) for f in witness.identity if args.get(f) not in (None, "")), "")
+    if not raw:
+        return None
+    return _resolve_id(client, verb.doctype, raw) or raw
+
+
+def _recovery_hint(verb: Any, stamped: str | None) -> str:
+    """What a human can safely do next — said PER VERB, because the honest answer differs. A
+    reassuring generic sentence here would be the same class of lie as reporting `failed_terminal`."""
+    witness = getattr(verb, "witness", None)
+    if witness is None:
+        return (f"{CANONICAL_SENTENCE} This verb declares no recovery witness at all, so nothing "
+                f"here can tell 'never happened' from 'already happened' — a human must look "
+                f"before it is run again. Declare `witness=` on it in translate.py.")
+    if witness.shape == CONVERGENT:
+        return (f"This verb is convergent on {list(witness.identity)}: re-applying it produces the "
+                f"same state, so a re-commit after checking the record does not compound the effect.")
+    if witness.shape == ATTEMPT_KEYED and stamped:
+        if witness.negative_authoritative:
+            return (f"This verb stamps its attempt key into `{stamped}`: re-commit under the SAME "
+                    f"idempotency key and it will return the existing record, never a second one.")
+        return (f"This verb stamps its attempt key into `{stamped}`, but its witness query is NOT "
+                f"authoritative on absence ({witness.note}) — a re-commit can find an existing "
+                f"record, it can never prove there is none. A human must look.")
+    if witness.shape == ATTEMPT_KEYED:
+        return (f"This verb declares `{witness.field}` as its attempt-key field, but the live target "
+                f"does not carry it as a writable field — so no key was stamped and no probe can "
+                f"run. A human must look before it is run again.")
+    return (f"This verb has no queryable recovery witness, and says so: {witness.note} "
+            f"A human must verify in {SYSTEM} before it is run again.")
+
+
+def _in_doubt_refusal(env: dict[str, Any], exc: OutcomeInDoubt, hint: str) -> dict[str, Any]:
+    """An unobserved effect answered as a REFUSAL the caller can read — never an exception (a 500),
+    and never `failed_terminal` (which asserts "it did not happen"; nobody knows that).
+
+    The code is `SUSPENDED` because the kernel's `RefusalCode` is a CLOSED enum: a code outside it
+    makes pydantic raise in the SDK and kills the run at its first step. SUSPENDED is the closest
+    legal meaning — the System has stopped and a human must decide — and, unlike
+    UPSTREAM_UNAVAILABLE, it is NOT retriable, so no caller reads it as "just try again". The
+    machine-readable hazard rides in the message as `OUTCOME_IN_DOUBT`."""
+    where = f"{exc.target}.{exc.operation}".strip(".")
+    return _refusal(
+        env, "SUSPENDED",
+        f"{_IN_DOUBT}: {exc}" + (f" — {where} may already have taken effect." if where else "")
+        + f" Do not retry blindly; verify in {SYSTEM} and decide. {hint}",
+    )
+
+
+def _settle_doubt(env: dict[str, Any], client: SystemClient, verb: Any, args: dict[str, Any],
+                  native: dict[str, Any], exc: OutcomeInDoubt, *,
+                  marker: str | None, stamped: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """A write whose answer was lost: ask the backing system what actually happened.
+
+        FOUND      -> SUCCEEDED   (recover the receipt, do NOT re-execute)
+        NOT FOUND  -> UNKNOWN     (do NOT automatically replay)
+
+    NOT FOUND collapses to "safe to execute" ONLY where the verb declared its witness query
+    read-your-writes consistent with the mutation path (`negative_authoritative`) — the same
+    committed store, no async indexing, no delivery pipeline between. Otherwise NOT FOUND means
+    "not yet" as easily as "never", and it goes to the human gate.
+
+    Returns `(recovered_record, refusal)` — exactly one is not None."""
+    witness = getattr(verb, "witness", None)
+    hint = _recovery_hint(verb, stamped)
+
+    if witness is not None and witness.shape == ATTEMPT_KEYED and marker and stamped:
+        try:
+            landed = _find_by_marker(client, verb.doctype, stamped, marker)
+        except OutcomeInDoubt as louder:      # a duplicate already carries this key: the louder doubt wins
+            return None, _in_doubt_refusal(env, louder, hint)
+        except SystemError:
+            return None, _in_doubt_refusal(env, exc, hint)  # could not look ≠ nothing there
+        if landed is not None:
+            return landed, None
+        if witness.negative_authoritative:
+            return None, _refusal(
+                env, "UPSTREAM_UNAVAILABLE",
+                f"{verb.verb}: the answer was lost ({exc}), and this attempt's key is NOT APPLIED "
+                f"in `{stamped}` — the witness query reads the same committed store the write goes "
+                f"to, so absence is authoritative. Re-committing under the same idempotency key is "
+                f"safe.")
+        return None, _in_doubt_refusal(env, exc, hint)
+
+    if witness is not None and witness.shape == CONVERGENT:
+        rid = _convergent_id(client, verb, args)
+        if rid:
+            try:
+                after = client.get(verb.doctype, rid)
+            except SystemError:
+                return None, _in_doubt_refusal(env, exc, hint)  # cannot look — the doubt stands
+            if after is not None and not _verify_write(client, verb.doctype, rid, native):
+                return after, None
+            if not witness.negative_authoritative:
+                return None, _in_doubt_refusal(env, exc, hint)
+        return None, _refusal(
+            env, "UPSTREAM_UNAVAILABLE",
+            f"{verb.verb}: the answer was lost ({exc}), and this mutation is CONVERGENT on "
+            f"{list(witness.identity)} — re-applying the same values to the same record is the same "
+            f"state, so it is safe to re-apply. {witness.note}")
+
+    return None, _in_doubt_refusal(env, exc, hint)
+
+
 def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | None) -> FastAPI:
     app = FastAPI(title="nil-adapter-template shim", version="0.1.0")
     state = ShimState()
@@ -315,6 +488,9 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         _auth(authorization)
         body = env.get("body", {})
         key = body.get("idempotency_key", "")
+        # A FAST PATH, not the proof: `state.ledger` is in-process and dies with the worker, so it
+        # can only recognise a retry this same process already served. The durable answer lives in
+        # the backing system (see the recovery witness below and in recovery.py).
         if key in state.ledger:  # retried COMMIT — replay, no second write
             return _envelope("STATUS", env, {**state.ledger[key], "replayed": True})
         proposal_id = body.get("proposal", "")
@@ -346,6 +522,14 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
                     else:  # delete
                         client.delete(target, rid)
                         rev_verb, rev_args, rev = "resource.create", {"target": target, "data": before}, "COMPENSABLE"
+            except OutcomeInDoubt as exc:  # BEFORE SystemError — see _in_doubt_refusal
+                # `resource.*` names an ARBITRARY target, so no witness can be declared for it in
+                # advance: the honest refusal is the only correct answer here, never a replay.
+                print(f"[shim] RESOURCE WRITE IN DOUBT {stored['verb']} -> {exc}", flush=True)
+                return _in_doubt_refusal(env, exc, (
+                    "`resource.*` addresses a target chosen at request time, so no recovery witness "
+                    "can be declared for it in advance. Verify the record before it is run again; "
+                    "use the target's curated verb (which declares a witness) where one exists."))
             except (SystemError, NotImplementedError) as exc:
                 print(f"[shim] RESOURCE WRITE FAILED {stored['verb']} -> {exc}", flush=True)
                 return _envelope("STATUS", env, {"proposal": proposal_id, "state": "failed_terminal", "replayed": False})
@@ -374,33 +558,76 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
                          "proposal": proposal_id, "result": result}), state.next_sequence(env.get("workspace", "")))
             return _envelope("STATUS", env, status_body)
         verb = WRITE_VERBS[stored["verb"]]
+        # Write-path dispatch by the standard's verb lexicon: delete_* -> DELETE, update_* ->
+        # PATCH/UPDATE, everything else (create_/record_/send_/draft_/process_) -> CREATE. The
+        # record id for update/delete is the verb's first required arg (e.g. product_id). Computed
+        # BEFORE the try so the doubt handler below can still classify a call that never returned.
+        op = write_op(stored["verb"])
+        native: dict[str, Any] = {}
+        created: dict[str, Any] = {}
+        marker: str | None = None
+        stamped: str | None = None
+        # True when the durable witness showed this attempt had ALREADY written — so this COMMIT
+        # wrote nothing. `state.ledger` reports the same thing for a retry the adapter's own memory
+        # recognises; this reports it for the retry only the BACKING SYSTEM can settle.
+        idem_replay = False
         try:
             # to_native is inside the try so an UNFILLED stub (NotImplementedError) is a clean
             # terminal failure, not a 500 — the conformance proof reads it as non-conformance.
             native = overlay_requirements(stored["verb"], verb.to_native(stored["args"]))  # manifest pre-fill
-            # Write-path dispatch by the standard's verb lexicon: delete_* -> DELETE, update_* ->
-            # PATCH/UPDATE, everything else (create_/record_/send_/draft_/process_) -> CREATE. The
-            # record id for update/delete is the verb's first required arg (e.g. product_id).
-            action = stored["verb"].split(".")[-1]
-            if action.startswith("delete_"):
+            if op == "delete":
                 raw = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
                 record_id = _resolve_id(client, verb.doctype, raw) or raw  # accept id or human identifier
                 client.delete(verb.doctype, record_id)
                 created = {"name": record_id}
-            elif action.startswith("update_"):
+            elif op == "update":
                 raw = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
                 record_id = _resolve_id(client, verb.doctype, raw) or raw
                 created = client.update(verb.doctype, record_id, native)
             else:
-                created = client.create(verb.doctype, native)  # the real write
+                # ASK FIRST when this verb declared somewhere durable to put the attempt key. The
+                # probe runs BEFORE the write, so it also settles the case the in-memory ledger
+                # cannot: the adapter restarted and the caller re-commits the same attempt — that
+                # must find the record the first leg already wrote, never mint a second act.
+                stamped = _stamp_field(client, verb)
+                if stamped and key:
+                    marker = _idem_marker(key)
+                    prior = native.get(stamped)
+                    native[stamped] = f"{prior} {marker}" if prior else marker
+                    try:
+                        landed = _find_by_marker(client, verb.doctype, stamped, marker)
+                    except OutcomeInDoubt:
+                        raise  # a duplicate already carries this key — do not add to the pile
+                    except SystemError as probe_failed:
+                        # The ask-first guard could not run. Writing anyway is exactly how the
+                        # duplicate gets made, so nothing is written — and "nothing was written" is
+                        # a DETERMINATE answer, not a doubt: this one is safe to retry.
+                        return _refusal(
+                            env, "UPSTREAM_UNAVAILABLE",
+                            f"could not check whether this attempt already wrote a "
+                            f"{verb.doctype} ({probe_failed}) — NOTHING WAS WRITTEN. Retrying under "
+                            f"the same idempotency key is safe.")
+                    if landed is not None:
+                        created, idem_replay = landed, True
+                    else:
+                        created = client.create(verb.doctype, native)  # the real write
+                else:
+                    created = client.create(verb.doctype, native)  # the real write
+        except OutcomeInDoubt as exc:  # BEFORE SystemError — an unobserved effect is not a failure
+            print(f"[shim] WRITE IN DOUBT verb={stored['verb']} -> {exc}", flush=True)
+            recovered, refusal = _settle_doubt(env, client, verb, stored["args"], native, exc,
+                                               marker=marker, stamped=stamped)
+            if refusal is not None:
+                return refusal
+            created, idem_replay = recovered or {}, True
         except (SystemError, NotImplementedError) as exc:
             print(f"[shim] WRITE FAILED verb={stored['verb']} -> {exc}", flush=True)
             return _envelope("STATUS", env, {"proposal": proposal_id, "state": "failed_terminal", "replayed": False})
         reversibility = COMPENSATIONS.get(stored["verb"], {}).get("reversibility", "IRREVERSIBLE")
-        status_body = {"proposal": proposal_id, "state": "executed", "replayed": False}
-        fields_written = {} if action.startswith("delete_") else native
+        status_body = {"proposal": proposal_id, "state": "executed", "replayed": idem_replay}
+        fields_written = {} if op == "delete" else native
         effect_id = str(created.get("id") or created.get("name") or "")
-        if action.startswith("delete_"):
+        if op == "delete":
             unverified, verified = [], client.get(verb.doctype, effect_id) is None
         elif fields_written and effect_id:
             unverified = _verify_write(client, verb.doctype, effect_id, fields_written)
@@ -427,6 +654,9 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         status_body["compensation"] = comp_block
         result["compensation"] = comp_block
         status_body["result"] = result  # surface the SSOT entity + system-of-record to the committer
+        # The volatile ledger is a FAST PATH, never the proof — it is written only here, after the
+        # mutation it claims to record, and it dies with the process. The durable witness above is
+        # what answers after a restart.
         state.ledger[key] = status_body
         state.executed.add(proposal_id)  # so GET /status reports executed, not just proposed
         sequence = state.next_sequence(env.get("workspace", ""))

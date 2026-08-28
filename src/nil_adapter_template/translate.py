@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from nil_adapter_template.recovery import RecoveryWitness, witness_verdict
 from nil_adapter_template.system import SystemClient
 
 Bilingual = dict[str, str]
@@ -30,9 +31,50 @@ class WriteVerb:
     # The edge verifies the referenced record EXISTS before proposing — so "an invoice needs a client"
     # is a fact the adapter states, enforced universally, not a backend-specific afterthought.
     references: dict[str, str] = field(default_factory=dict)
+    # DECLARED recovery witness: WHERE this verb's durable evidence lives in the backing system —
+    # the field or lookup that answers *"did attempt X land?"* after the process disappeared. See
+    # `recovery.py` for the contract and the six questions a declaration must answer. Two shapes
+    # pass — an attempt-keyed field the edge stamps and queries, or a convergent identity whose
+    # re-application is the same state — and `no_witness(<reason>)` is the honest third answer.
+    #
+    #     from nil_adapter_template.recovery import ATTEMPT_KEYED, CONVERGENT, RecoveryWitness, no_witness
+    #
+    #     witness=RecoveryWitness(shape=ATTEMPT_KEYED, field="reference",
+    #                             lookup="list('Invoice', {'reference': <marker>})",
+    #                             negative_authoritative=True,
+    #                             note="`reference` is a free-text document reference we persist.")
+    #     witness=RecoveryWitness(shape=CONVERGENT, identity=("sku",),
+    #                             lookup="get('Stock Level', <sku>)", negative_authoritative=True,
+    #                             note="SET semantics: same sku + same quantity = same state.")
+    #     witness=no_witness("Lead has no free-text reference field — nothing to query on.")
+    #
+    # LEFT UNSET the verb is UNKNOWN, the conformance gate fails the fork by name, and the edge
+    # refuses to resolve any doubt about it. That is deliberate: a template that says nothing about
+    # recovery is a mechanism for reproducing an unsafe recovery model in every fork, and two forks
+    # have already proved it by independently inventing an unkeyed retry loop.
+    witness: RecoveryWitness | None = None
 
     def missing(self, args: dict[str, Any]) -> list[str]:
         return [field for field in self.required if not args.get(field)]
+
+    @property
+    def may_replay(self) -> bool:
+        """Never true from a declaration alone — see `recovery.witness_verdict`. UNKNOWN is UNSAFE,
+        so the honest runtime answer to "may I re-run this?" is always no until a gate demonstrates
+        the witness and a recovery layer performs the lookup."""
+        return witness_verdict(self) == "SAFE"
+
+
+# The standard's write lexicon, one place: `delete_*` -> DELETE, `update_*` -> UPDATE, and every
+# other action (create_/record_/send_/draft_/process_) mints something new. The edge dispatches on
+# this, and so does the recovery gate — one classification, never two that can disagree.
+def write_op(verb_name: str) -> str:
+    action = verb_name.split(".")[-1]
+    if action.startswith("delete_"):
+        return "delete"
+    if action.startswith("update_"):
+        return "update"
+    return "create"
 
 
 @dataclass(frozen=True)

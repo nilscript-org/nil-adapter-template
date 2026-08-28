@@ -32,6 +32,13 @@ jobs:
           python-version: "3.12"
       - name: Install the shim
         run: pip install -e ".[dev]"
+      # Gate 0 — the recovery witness. Run FIRST and named separately, because it is the one gate
+      # whose absence silently reproduces an unsafe recovery model in the next fork: every
+      # externally mutating verb must DECLARE a durable recovery witness (or honestly declare it has
+      # none), and the declaration must be DEMONSTRATED against the backing system. A declaration
+      # alone is UNKNOWN, and UNKNOWN is treated exactly as UNSAFE. See README "The recovery contract".
+      - name: Recovery gate — every mutating verb declares a DEMONSTRATED witness
+        run: pytest -q conformance/test_recovery_witness.py
       - name: Conformance proof — every active write verb must reach `executed`
         run: pytest -q
 
