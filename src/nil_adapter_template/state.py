@@ -11,10 +11,40 @@ from typing import Any
 class ShimState:
     def __init__(self) -> None:
         self.proposals: dict[str, dict[str, Any]] = {}  # proposal_id -> {verb, args}
+        # THE OUTCOME record: what actually happened, written only AFTER the mutation returned.
         self.ledger: dict[str, dict[str, Any]] = {}  # idempotency_key -> STATUS body
+        # THE INTENT record (C2.5): written BEFORE the mutation, so a death between "the backing
+        # system accepted it" and "we wrote the outcome down" leaves something to recover BY.
+        #
+        # Intent and outcome are DIFFERENT RECORDS on purpose. A single row written after the act
+        # cannot witness the act's own failure; a single row written before it would claim an
+        # effect nobody observed. The pair is the whole point:
+        #
+        #     intent + outcome  → it happened, here is the receipt
+        #     intent, no outcome → OUTCOME_IN_DOUBT — ask the witness, never assume either way
+        #     neither            → nothing was attempted
+        #
+        # An intent is NEVER, on its own, evidence that the mutation occurred.
+        self.intents: dict[str, dict[str, Any]] = {}  # idempotency_key -> {verb, args, at}
         self.executed: set[str] = set()  # proposal_ids that reached a committed write
         self.compensations: dict[str, dict[str, Any]] = {}  # compensation_token -> {verb, result}
         self._seq: dict[str, int] = {}
+
+    def record_intent(self, key: str, verb: str, args: dict[str, Any]) -> None:
+        """Declare the attempt BEFORE performing it. Idempotent: a re-entered attempt keeps the
+        original intent, so the record answers "when did we first try this", not "when did we last
+        pass through here"."""
+        self.intents.setdefault(key, {"verb": verb, "args": dict(args)})
+
+    def intent_of(self, key: str) -> dict[str, Any] | None:
+        """The declared intent for an attempt, or None when none was ever recorded."""
+        return self.intents.get(key)
+
+    def in_doubt(self, key: str) -> bool:
+        """An attempt that declared itself and never recorded an outcome. This is the state a
+        crash between the mutation and its receipt leaves behind — and the ONLY honest reading of
+        it is doubt: the effect may or may not exist, and the witness is what settles it."""
+        return key in self.intents and key not in self.ledger
 
     def next_sequence(self, workspace: str) -> int:
         self._seq[workspace] = self._seq.get(workspace, 0) + 1

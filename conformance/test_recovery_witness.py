@@ -153,6 +153,13 @@ def _register(monkeypatch: pytest.MonkeyPatch, *verbs: WriteVerb) -> None:
     monkeypatch.setattr(edge_mod, "_CURATED_BY_DOCTYPE", {v.doctype: v for v in verbs})
 
 
+def _app_with_state(system: FakeSystem, state: Any) -> TestClient:
+    """An app whose ShimState the test holds, so the durable records can be inspected directly —
+    the intent/outcome pair is the subject, not a side effect to infer from responses."""
+    app = create_app(system, CapturingEmitter(), bearer=None, state=state)
+    return TestClient(app, raise_server_exceptions=False)
+
+
 def _app(system: FakeSystem) -> TestClient:
     return TestClient(create_app(system, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
 
@@ -823,4 +830,112 @@ class TestAnEmptyKeyIsMalformedNotAnIdentity:
             json={"nil": "0.1", "grant": "g", "workspace": "w",
                   "body": {"proposal": "irrelevant", "idempotency_key": "k-1"}},
         ).json()["body"]
+        assert again.get("replayed") is True, again
+
+
+# ── C2.5: INTENT precedes the mutation, and is never evidence the mutation happened ──────────────
+#
+# Every adapter wrote its ledger row AFTER the external call — the one ordering that cannot help.
+# A record written after the act cannot witness the act's own failure: the window between "the
+# backing system accepted it" and "we wrote it down" is exactly the window a crash lands in, and
+# afterwards nothing distinguishes "never sent" from "sent, answer lost".
+#
+# The cure is TWO records, not an earlier one. The lifecycle:
+#
+#     1 DURABLE INTENT  →  2 ask/check existing effect  →  3 external mutation
+#                                                       →  4 DURABLE OUTCOME  →  5 finalize
+#
+# A death between 3 and 4 leaves `intent + no outcome`, which reads as OUTCOME_IN_DOUBT and hands
+# recovery something to ask about. The intent row is what makes the doubt RECOVERABLE — and it is
+# never, on its own, evidence that the mutation occurred. Conflating the two would be the same
+# defect in a new place: a receipt that outran reality.
+
+
+class _DiesAfterTheMutation(FakeSystem):
+    """The backing system commits, then the process dies before anything records the outcome.
+
+    A bare `RuntimeError` is the right stand-in precisely because the edge does NOT catch it: its
+    handlers know `SystemError`, `NotImplementedError` and `OutcomeInDoubt`, so an unclassified
+    blow-up unwinds past every one of them — which is what a real process death does.
+    """
+
+    def create(self, target: str, doc: dict[str, Any]) -> dict[str, Any]:
+        super().create(target, doc)          # the effect LANDS…
+        raise RuntimeError("the process died before the outcome was recorded")  # …nothing records it
+
+
+def _commit_expecting_death(client: TestClient, verb: str, args: dict[str, Any], key: str) -> None:
+    """Drive a commit whose process dies mid-flight. The response is deliberately NOT parsed —
+    there is no receipt, which is the entire point: what survives is the durable state."""
+    env = {"nil": "0.1", "grant": "g", "workspace": "w", "body": {"verb": verb, "args": args}}
+    proposed = client.post("/nil/v0.1/propose", json=env).json()["body"]
+    assert proposed.get("id"), f"PROPOSE refused: {proposed}"
+    client.post(
+        "/nil/v0.1/commit",
+        json={"nil": "0.1", "grant": "g", "workspace": "w",
+              "body": {"proposal": proposed["id"], "idempotency_key": key}},
+    )
+
+
+class TestIntentPrecedesTheMutation:
+    def test_the_intent_is_durable_BEFORE_the_backing_system_is_called(self, monkeypatch) -> None:
+        """The ordering, asserted at the seam rather than by reading the code: when the system is
+        called, the intent for that attempt must already exist."""
+        _register(monkeypatch, KEYED)
+        seen: list[bool] = []
+        system = FakeSystem()
+        state = edge_mod.ShimState()
+        original = system.create
+
+        def watching_create(target: str, doc: dict[str, Any]) -> dict[str, Any]:
+            seen.append(state.intent_of("k-1") is not None)
+            return original(target, doc)
+
+        monkeypatch.setattr(system, "create", watching_create)
+        _commit(_app_with_state(system, state), KEYED.verb, {"party_id": "p1"}, "k-1")
+        assert seen == [True], (
+            "the backing system was called before any durable intent existed — a crash here "
+            "leaves nothing to recover by",
+        )
+
+    def test_a_death_after_the_mutation_leaves_INTENT_WITHOUT_OUTCOME(self, monkeypatch) -> None:
+        """The crash-between test the plan asks for. The intent survives; the outcome does not;
+        and the pair is what recovery reads as doubt."""
+        _register(monkeypatch, KEYED)
+        system = _DiesAfterTheMutation()
+        state = edge_mod.ShimState()
+        _commit_expecting_death(_app_with_state(system, state), KEYED.verb, {"party_id": "p1"}, "k-1")
+
+        assert state.intent_of("k-1") is not None, "no intent survived — the doubt is unrecoverable"
+        assert state.ledger.get("k-1") is None, "an outcome was recorded for a death mid-flight"
+        assert state.in_doubt("k-1") is True, "intent-without-outcome must read as DOUBT"
+        assert len(system.docs.get(KEYED.doctype, [])) == 1, "the fixture did not land the effect"
+
+    def test_the_intent_alone_is_NEVER_read_as_success(self, monkeypatch) -> None:
+        """THE RULE. An intent row says "we were about to"; only an outcome says "we did". A
+        replay that answered `executed` off the intent would be a receipt for an act nobody
+        witnessed — the same lie, one layer earlier."""
+        _register(monkeypatch, KEYED)
+        system = _DiesAfterTheMutation()
+        state = edge_mod.ShimState()
+        _commit_expecting_death(_app_with_state(system, state), KEYED.verb, {"party_id": "p1"}, "k-1")
+
+        # A fresh commit under the SAME key, as the retry after a restart would arrive.
+        replayed = _commit(_app_with_state(FakeSystem(), state), KEYED.verb, {"party_id": "p1"}, "k-1")
+        assert replayed.get("replayed") is not True, (
+            "the intent row was replayed as a completed commit — 'we were about to' answered as "
+            "'we did'", replayed,
+        )
+
+    def test_a_successful_commit_records_BOTH_and_the_outcome_is_what_replays(self, monkeypatch) -> None:
+        """The happy path keeps its behaviour: intent then outcome, and the retry replays the
+        OUTCOME — so this change costs the fast path nothing."""
+        _register(monkeypatch, KEYED)
+        state = edge_mod.ShimState()
+        client = _app_with_state(FakeSystem(), state)
+        first = _commit(client, KEYED.verb, {"party_id": "p1"}, "k-1")
+        assert first["state"] == "executed", first
+        assert state.intent_of("k-1") is not None and state.ledger.get("k-1") is not None
+
+        again = _commit(client, KEYED.verb, {"party_id": "p1"}, "k-1")
         assert again.get("replayed") is True, again

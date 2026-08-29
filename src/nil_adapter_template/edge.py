@@ -386,9 +386,15 @@ def _settle_doubt(env: dict[str, Any], client: SystemClient, verb: Any, args: di
     return None, _in_doubt_refusal(env, exc, hint)
 
 
-def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | None) -> FastAPI:
+def create_app(
+    client: SystemClient, emitter: EventEmitter, *, bearer: str | None,
+    state: ShimState | None = None,
+) -> FastAPI:
     app = FastAPI(title="nil-adapter-template shim", version="0.1.0")
-    state = ShimState()
+    # `state` is injectable so a conformance test can hold the durable records and assert the
+    # intent/outcome PAIR directly — the ordering is the subject, not something to infer from a
+    # response body. Production passes nothing and gets its own, exactly as before.
+    state = state if state is not None else ShimState()
     apply_transport_quirks(client)  # manifest-driven: e.g. drop Expect: 100-continue (plan §4.4)
 
     def _auth(authorization: str | None) -> None:
@@ -580,6 +586,13 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         # record id for update/delete is the verb's first required arg (e.g. product_id). Computed
         # BEFORE the try so the doubt handler below can still classify a call that never returned.
         op = write_op(stored["verb"])
+        # C2.5 — DECLARE THE ATTEMPT BEFORE PERFORMING IT. The outcome (`state.ledger`) is written
+        # only after the mutation returns, which is the one ordering that cannot witness the
+        # mutation's own failure: a death in between used to leave nothing at all, and afterwards
+        # nothing could tell "never sent" from "sent, answer lost". The intent is what makes that
+        # window recoverable — `intent + no outcome` reads as OUTCOME_IN_DOUBT (`state.in_doubt`)
+        # — and it is NEVER, on its own, evidence that the mutation happened.
+        state.record_intent(key, stored["verb"], stored.get("args") or {})
         native: dict[str, Any] = {}
         created: dict[str, Any] = {}
         marker: str | None = None
