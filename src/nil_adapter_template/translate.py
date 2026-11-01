@@ -36,6 +36,42 @@ class QueryVerb:
     verb: str
     run: Callable[[SystemClient, dict[str, Any]], dict[str, Any]]
 
+
+# --- Units (D-554 4a): the system's unit -> an approved UN/ECE Rec 20 code, at THIS boundary only ------
+#
+# The hub accepts exactly these codes (SERVICE: E48 HUR DAY; GOODS: the rest). A vendor's unit word never
+# crosses the adapter: it is translated through ONE table, or it is not translated at all.
+
+#: The approved Rec 20 set (the hub's `units.UNITS` keys). A table value outside it is refused, not passed.
+APPROVED_UNIT_CODES: frozenset[str] = frozenset({
+    "E48", "HUR", "DAY",
+    "H87", "SET", "PR", "DZN", "RM", "XBE", "XBX", "XCT", "XPK", "XBG", "XRO",
+    "KGM", "GRM", "TNE", "LTR", "MLT", "MTR", "MTK", "MTQ",
+})
+
+#: TODO: ONE table per adapter — your system's stable unit id (or, if it has none, its exact unit name)
+#: -> an approved code. Map only what you can prove; anything absent is left unmapped, never guessed.
+UNIT_TABLE: dict[Any, str] = {}
+
+
+def unit_code(system_unit: Any) -> str | None:
+    """The approved Rec 20 code for `system_unit`, or None. Exact lookup; no default, no fuzzy match."""
+    try:
+        code = UNIT_TABLE.get(system_unit)
+    except TypeError:  # unhashable input is not a unit the table names
+        return None
+    return code if code in APPROVED_UNIT_CODES else None
+
+
+def product_unit(system_unit: Any) -> dict[str, Any]:
+    """The unit fields a product read returns: `{"unit": code}` when mapped, else
+    `{"unit": None, "unit_source": <the system's own word>}` — the hub then lists the item as not
+    pickable (PICK_ITEM_NO_UNIT). Never a guess, never a default."""
+    code = unit_code(system_unit)
+    if code is not None:
+        return {"unit": code}
+    return {"unit": None, "unit_source": system_unit}
+
 def _to_native_create_coupon(args: dict[str, Any]) -> dict[str, Any]:
     # TODO: map NIL args -> a native commerce document for 'commerce.create_coupon'.
     # Hidden requirements (company, accounts, …) are pre-filled from the manifest — see manifest.py.
