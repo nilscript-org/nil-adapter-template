@@ -1,9 +1,11 @@
 name: conformance
 
-# The conformance harness. On day one this is RED — the generated stubs in
+# The conformance harness. In a fork, on day one this is RED — the generated stubs in
 # translate.py / system.py / compensation.py raise NotImplementedError, so every
 # active write verb fails. That is the point: the harness proves it detects
 # non-conformance, not just conformance. As you fill the stubs, verbs flip green.
+# In the template itself the fork_obligation tests are skipped and the stubs are
+# proven unfilled instead (conformance/conftest.py), so the template is green.
 
 on:
   push:

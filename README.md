@@ -12,8 +12,8 @@ backend never declared is unexpressible, not filtered.
 
 This is a pristine `nilscript scaffold-shim` output: a complete, bootable NIL shim whose
 edge / state / models / manifest loader are generic and finished, and whose three
-fill-in files ship as `NotImplementedError` stubs. **The bundled conformance proof is red
-on day one** — that is the point. As you fill the stubs, the write verbs flip green.
+fill-in files ship as `NotImplementedError` stubs. **In your fork the bundled conformance proof is
+red on day one** — that is the point. As you fill the stubs, the write verbs flip green.
 
 ## Quick start
 
@@ -43,9 +43,11 @@ pip install -e ".[dev]"
 pytest                         # offline conformance proof against the in-memory FakeSystem
 ```
 
-On a fresh template `pytest` **fails** every active write verb (the stubs raise
-`NotImplementedError`) — proving the harness detects non-conformance, not just conformance.
-Fill the stubs until it is green.
+The tests a fork must pass carry `@pytest.mark.fork_obligation`. In the template itself they are
+skipped and the template proves the opposite: every stub raises `NotImplementedError("fill …")`
+(`conformance/test_fork_obligation.py`). Once you rename the package and `pyproject.toml` `name`
+(step 2), the same tests run and every unfilled stub is **red** — proving the harness detects
+non-conformance, not just conformance. Fill the stubs until it is green.
 
 Then, against a running shim:
 

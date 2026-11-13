@@ -1,8 +1,9 @@
 """Conformance proof for this shim — drives the edge with PROPOSE -> COMMIT per active write verb.
 
-Runs against the in-memory FakeSystem (no live backend). With empty translation stubs every verb
-FAILS (the stub raises NotImplementedError) — that is the point: the harness must detect
-non-conformance. As you fill `translate.py`, verbs flip to passing.
+Runs against the in-memory FakeSystem (no live backend). In a fork, with empty translation stubs
+every verb FAILS (the stub raises NotImplementedError) — that is the point: the harness must detect
+non-conformance. As you fill `translate.py`, verbs flip to passing. In the template itself the
+`fork_obligation` tests are skipped (see conftest.py) and the stubs are proven unfilled instead.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ def _commit(client, verb_name: str) -> dict:
     ).json()["body"]
 
 
+@pytest.mark.fork_obligation
 def test_rollback_honesty() -> None:
     """A reversible verb emits a compensation token and ROLLBACK previews (never silently writes);
     an unknown token is refused. Skips only if no verb is mapped reversible in compensation.py."""
@@ -51,6 +53,7 @@ def test_rollback_honesty() -> None:
     assert bogus["outcome"] == "refusal", "an unknown compensation token must be refused, never reversed"
 
 
+@pytest.mark.fork_obligation
 @pytest.mark.parametrize("verb_name", sorted(WRITE_VERBS))
 def test_write_verb_reaches_executed(verb_name: str) -> None:
     client = TestClient(create_app(FakeSystem(), CapturingEmitter(), bearer=None), raise_server_exceptions=False)
