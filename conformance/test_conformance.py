@@ -2,8 +2,8 @@
 
 Runs against the in-memory FakeSystem (no live backend). In a fork, with empty translation stubs
 every verb FAILS (the stub raises NotImplementedError) — that is the point: the harness must detect
-non-conformance. As you fill `translate.py`, verbs flip to passing. In the template itself the
-`fork_obligation` tests are skipped (see conftest.py) and the stubs are proven unfilled instead.
+non-conformance. As you fill `translate.py`, verbs flip to passing. Only under TEMPLATE_SELF_CHECK=1 (the template's
+own checks) are the `fork_obligation` tests skipped and the stubs proven unfilled instead (conftest.py).
 """
 
 from __future__ import annotations

@@ -43,11 +43,12 @@ pip install -e ".[dev]"
 pytest                         # offline conformance proof against the in-memory FakeSystem
 ```
 
-The tests a fork must pass carry `@pytest.mark.fork_obligation`. In the template itself they are
-skipped and the template proves the opposite: every stub raises `NotImplementedError("fill …")`
-(`conformance/test_fork_obligation.py`). Once you rename the package and `pyproject.toml` `name`
-(step 2), the same tests run and every unfilled stub is **red** — proving the harness detects
-non-conformance, not just conformance. Fill the stubs until it is green.
+The tests a fork must pass carry `@pytest.mark.fork_obligation`. They fail closed: by default
+they run and every unfilled stub is **red** — proving the harness detects non-conformance, not
+just conformance. Only the template's own checks set `TEMPLATE_SELF_CHECK=1` (its CI workflow and
+the merge queue's target line), which skips them and proves instead that every stub raises
+`NotImplementedError("fill …")` (`conformance/test_fork_obligation.py`). **In your fork, delete the
+`TEMPLATE_SELF_CHECK` env block from `.github/workflows/conformance.yml`.** Fill the stubs until it is green.
 
 Then, against a running shim:
 
