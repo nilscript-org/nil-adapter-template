@@ -12,8 +12,8 @@ backend never declared is unexpressible, not filtered.
 
 This is a pristine `nilscript scaffold-shim` output: a complete, bootable NIL shim whose
 edge / state / models / manifest loader are generic and finished, and whose three
-fill-in files ship as `NotImplementedError` stubs. **The bundled conformance proof is red
-on day one** — that is the point. As you fill the stubs, the write verbs flip green.
+fill-in files ship as `NotImplementedError` stubs. **In your fork the bundled conformance proof is
+red on day one** — that is the point. As you fill the stubs, the write verbs flip green.
 
 ## Quick start
 
@@ -43,9 +43,12 @@ pip install -e ".[dev]"
 pytest                         # offline conformance proof against the in-memory FakeSystem
 ```
 
-On a fresh template `pytest` **fails** every active write verb (the stubs raise
-`NotImplementedError`) — proving the harness detects non-conformance, not just conformance.
-Fill the stubs until it is green.
+The tests a fork must pass carry `@pytest.mark.fork_obligation`. They fail closed: by default
+they run and every unfilled stub is **red** — proving the harness detects non-conformance, not
+just conformance. Only the template's own checks set `TEMPLATE_SELF_CHECK=1` (its CI workflow and
+the merge queue's target line), which skips them and proves instead that every stub raises
+`NotImplementedError("fill …")` (`conformance/test_fork_obligation.py`). **In your fork, delete the
+`TEMPLATE_SELF_CHECK` env block from `.github/workflows/conformance.yml`.** Fill the stubs until it is green.
 
 Then, against a running shim:
 
