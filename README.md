@@ -36,6 +36,12 @@ You do **not** author these — the generic edge provides them once you implemen
 - **Generic `resource.*` CRUD** (`create/read/update/delete`) over any target, with synthesized
   reversibility (before-image restore) and id-or-human-identifier resolution.
 
+### Events are signed v2, or not sent
+
+`NIL_EVENTS_WEBHOOK` turns on event delivery. Every event is signed v2 (`X-NIL-Signature: v2=...`, with
+`X-NIL-Key-Id`, `X-NIL-Timestamp`, `X-NIL-Nonce`) using this adapter's own `NIL_SERVICE_KEY` (`kid:secret`).
+With a webhook and no key the boot stops (`EVENT_KEY_UNSET`); the shared events secret signs no event.
+
 ## Verify
 
 ```

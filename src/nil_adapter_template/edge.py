@@ -99,24 +99,59 @@ class CapturingEmitter:
         self.events.append((sequence, event_envelope))
 
 
-class HttpEventEmitter:
-    """Real emitter: HMAC-SHA256 over the raw body + a monotonic per-workspace sequence header."""
+class EventKeyUnset(ValueError):
+    """Named refusal: no usable service key, so no event is signed and nothing is sent."""
 
-    def __init__(self, webhook_url: str, secret: str) -> None:
+
+def parse_service_key(raw: str) -> tuple[str, str]:
+    """NIL_SERVICE_KEY is `kid:secret`. Anything else (empty, no colon, empty half) is refused."""
+    kid, sep, secret = (raw or "").strip().partition(":")
+    if not (sep and kid and secret):
+        raise EventKeyUnset("EVENT_KEY_UNSET: NIL_SERVICE_KEY (kid:secret) is required to emit events; "
+                            "the shared secret signs no event")
+    return kid, secret
+
+
+class HttpEventEmitter:
+    """Real emitter: a monotonic per-workspace sequence header plus a v2 signature with this adapter's
+    OWN service key (kid, secret): fresh ts and nonce per send, MAC over
+    `nil.event.v2 NL ts NL nonce NL sha256hex(body)`. No key, no emitter: there is no shared-secret path."""
+
+    def __init__(self, webhook_url: str, *, service_key: tuple[str, str] | None, source: str) -> None:
+        kid, key_secret = service_key if isinstance(service_key, tuple) and len(service_key) == 2 else ("", "")
+        if not (kid and key_secret and source):
+            raise EventKeyUnset("EVENT_KEY_UNSET: NIL_SERVICE_KEY (kid:secret) and the key's service name "
+                                "are required to emit events; the shared secret signs no event")
         self._url = webhook_url
-        self._secret = secret.encode("utf-8")
+        self._service_key = (kid, key_secret)
+        self._source = source
+
+    @staticmethod
+    def sign_v2(secret: str, body: bytes, ts: int, nonce: str) -> str:
+        msg = (b"nil.event.v2\n" + str(int(ts)).encode() + b"\n" + nonce.encode() + b"\n"
+               + hashlib.sha256(body).hexdigest().encode())
+        return hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
 
     def emit(self, event_envelope: dict[str, Any], sequence: int) -> None:
+        import secrets
+        import time
+
         import httpx
 
         raw = json.dumps(event_envelope, separators=(",", ":")).encode("utf-8")
-        signature = hmac.new(self._secret, raw, hashlib.sha256).hexdigest()
+        kid, key_secret = self._service_key
+        ts = int(time.time())
+        nonce = secrets.token_urlsafe(24)
         httpx.post(
             self._url,
             content=raw,
             headers={
                 "Content-Type": "application/json",
-                "X-NIL-Signature": signature,
+                "X-NIL-Signature": "v2=" + self.sign_v2(key_secret, raw, ts, nonce),
+                "X-NIL-Key-Id": kid,
+                "X-NIL-Timestamp": str(ts),
+                "X-NIL-Nonce": nonce,
+                "X-NIL-Source": self._source,
                 "X-NIL-Sequence": str(sequence),
             },
             timeout=10.0,
